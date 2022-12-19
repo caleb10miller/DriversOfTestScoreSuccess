@@ -1,0 +1,148 @@
+---
+title: "TestScores"
+author: "Caleb Miller"
+date: "10/24/2022"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(regclass)
+library(lubridate)
+
+library(arules)
+library(multcompView)
+```
+
+## Analysis
+
+```{r}
+TestScores <- read.csv("Case4-testscores.csv", stringsAsFactors = TRUE)
+dim(TestScores)
+names(TestScores)
+
+keep_cols <- c(
+  "ï..Gender", "Ethnicity", "ParentEducation", "Lunch", "PrepCourse", "SuccessScore"
+)
+
+TestScores <- TestScores[, keep_cols]
+dim(TestScores)
+
+mean(TestScores$SuccessScore)
+mean(TestScores$SuccessScore > 80) #19.4% of students scored greater than an 80 which is our metric of success
+
+write.csv(TestScores, "mycleanTestScores.csv", row.names = FALSE)
+```
+
+```{r}
+examine_testscore_driver <- function(driver) {
+  driver_formula <- formula(paste("SuccessScore ~", driver))
+
+  # Find success rate per group
+  success_rate <- aggregate(driver_formula, data = TestScores, FUN = function(x) mean(x>80))
+  names(success_rate)[2] <- "ProbSuccess"
+
+  # Find count per group
+  record_count <- aggregate(driver_formula, data = TestScores, FUN = length)
+  names(record_count)[2] <- "Count"
+
+  # Combine success rates and counts
+  success_summary <- merge(success_rate, record_count)
+
+  # Perform anova and extract p value
+  aov_results <- aov(driver_formula, data = TestScores)
+  p_val <- anova(aov_results)$`Pr(>F)`[1]
+
+  # Check if anova saw significant diff
+  if (p_val < 0.05) {
+    # Perform Tukey if significant diff
+    tukey_results <- TukeyHSD(aov_results)
+    tukey_letters <- multcompLetters4(aov_results, tukey_results)[[driver]]
+
+    letter_df <- data.frame(
+      names(tukey_letters$Letters),
+      tukey_letters$Letters
+    )
+    names(letter_df) <- c(driver, "Group")
+
+    # Combine tukey results to orignal summary
+    success_summary <- merge(success_summary, letter_df)
+  } else {
+    # Give all same group if no sig diff
+    success_summary$Group <- "a"
+  }
+
+  # Sort to have highest prob on top
+  success_summary <- success_summary[order(success_summary$ProbSuccess, decreasing = TRUE), ]
+  rownames(success_summary) <- NULL
+  success_summary <- success_summary[, c(driver, "ProbSuccess", "Group", "Count")]
+
+  # Create barplot (reordering factor levels to sort bars by rate)
+  TestScores[, driver] <- factor(TestScores[, driver], levels = success_summary[, driver])
+  mosaic(driver_formula, data = TestScores, inside = TRUE, equal = TRUE)
+
+  success_summary
+}
+```
+
+```{r}
+for (n in names(TestScores)) {
+  if (n != "SuccessScore") {
+    print(examine_testscore_driver(n))
+  }
+}
+```
+
+## Combinations of Drivers
+
+## Decision Tree
+
+```{r}
+tree <- rpart(SuccessScore ~ ., data = TestScores, cp = .01, minbucket = 50)
+
+tree$cptable
+
+summarize_tree(tree)
+visualize_model(tree)
+```
+
+## Market Basket Analysis
+
+```{r}
+# market basket analysis in R is verrry picky about data types
+TestScores$SuccessScore <- ifelse(TestScores$SuccessScore > 80, "Success", "NotSuccess")
+TestScores$SuccessScore <- factor(TestScores$SuccessScore)
+
+TestScores_Trans <- as(TestScores, "transactions")
+# tomato tomato
+mean(TestScores$SuccessScore == "Success")
+itemFrequency(TestScores_Trans)["SuccessScore=Success"]
+
+# All of arules is impossible to remember how to type up
+# If you want to repeat this, keep examples of code around
+
+# Parameters:
+min_count <- 25 # Min number of movies to consider a rule
+min_conf <- 0.25 # Min value of confidence
+max_len <- 3 # How long can lhs of rule be (ie if "if a and b in basket then c" is len 2)
+
+rules <- apriori(TestScores_Trans,
+  parameter = list(
+    supp = min_count / length(TestScores_Trans),
+    conf = min_conf,
+    maxlen = max_len
+  ),
+  appearance = list(default = "lhs", rhs = "SuccessScore=Success"),
+  control = list(verbose = FALSE)
+)
+
+# {a & b -> c} is redundant with rule {b & a -> c}
+rules <- rules[!is.redundant(rules)]
+rules <- rules[is.significant(rules, TestScores_Trans)]
+
+rules_df <- DATAFRAME(rules)
+
+rules_df <- rules_df[order(rules_df$confidence, decreasing = TRUE), ]
+rules_df
+```
+
